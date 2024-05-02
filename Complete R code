@@ -1,0 +1,490 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+### Step 1: Processing and Filtering Housing Data
+
+This code chunk loads housing, energy usage, and weather data from various sources, focusing particularly on refining and filtering housing data by specific county codes. It then saves the filtered dataset to a predefined location for further analysis, ensuring the dataset contains only relevant and essential attributes for subsequent processing steps.
+
+```{r}
+# Load the necessary library
+library(arrow)
+library(dplyr)
+library(readr)
+
+housing_data <- 'https://intro-datascience.s3.us-east-2.amazonaws.com/SC-data/static_house_info.parquet'
+static_housing_data <- read_parquet(housing_data)
+
+write.csv(static_housing_data, "E:/IDS Project/New folder/static_house.csv", row.names = FALSE)
+
+columns_to_include <- c("bldg_id", "in.sqft", "in.bedrooms", "in.city", "in.clothes_dryer", "in.clothes_washer", "in.cooking_range", "in.county", "in.dishwasher", "in.water_heater_fuel", "in.refrigerator", "in.vacancy_status", "in.income", "in.occupants", "in.heating_fuel", "in.heating_setpoint", "in.cooling_setpoint", "in.hvac_cooling_efficiency", "in.hvac_heating_efficiency")
+
+cleaned_housing_data<-static_housing_data[,columns_to_include]
+
+# Filter rows where 'in.county' is one of the specified values
+county_filter <- c("G4500730", "G4500850", "G4500910")
+filtered_housing_data <- cleaned_housing_data %>% filter(in.county %in% county_filter)
+
+write.csv(filtered_housing_data, "E:/IDS Project/New folder/Final_static_house.csv", row.names = FALSE)
+
+# View the first few rows of the final data frame
+head(filtered_housing_data)
+nrow(filtered_housing_data)
+```
+
+### Step 2: Fetching and Consolidating Building-Specific Energy Data
+
+This code chunk defines a function to download and preprocess energy consumption data for individual buildings, stored in Parquet format, from a specified URL. It aggregates this data for all buildings listed, processes it to include only records in July, and finally saves the combined dataset to a designated directory, ensuring all data manipulations are traced and documented efficiently.
+
+```{r}
+library(dplyr)
+library(purrr)
+library(lubridate)
+library(arrow)
+
+# Function to fetch and process energy data for a specific building
+fetch_energy_data <- function(bldg_id) {
+  # Construct the URL for the data file
+  energy_data_url <-
+    sprintf(
+      "https://intro-datascience.s3.us-east-2.amazonaws.com/SC-data/2023-houseData/%s.parquet",
+      bldg_id
+    )
+  
+  # Attempt to read the Parquet file
+  energy_data <- tryCatch({
+    read_parquet(energy_data_url)
+  }, error = function(e) {
+    message(sprintf("Failed to read data for building ID %s: %s", bldg_id, e$message))
+    return(NULL)
+  })
+  
+  
+  # Process the data if it was successfully read
+  if (!is.null(energy_data)) {t
+    energy_data <- mutate(energy_data, date_time = as.POSIXct(time, format = "%Y-%m-%d %H:%M:%S"))
+
+    
+    # Filter records from April to July using the correct vectorized & operator
+    energy_data <- filter(energy_data, month(date_time) == 7)
+    
+    # Add a building ID column
+    energy_data <-
+      mutate(energy_data, bldg_id = as.character(bldg_id))
+    
+    # Cluster energy data into categories and calculate total_energy
+    energy_data <- energy_data %>%
+      mutate(
+        electricity = rowSums(select(., starts_with(
+          "out.electricity."
+        )), na.rm = TRUE),
+        natural_gas = rowSums(select(., starts_with(
+          "out.natural_gas."
+        )), na.rm = TRUE),
+        total_energy = electricity + fuel_oil + natural_gas + propane
+      ) %>%
+      select(date_time,
+             bldg_id,
+             total_energy,
+             electricity,
+             natural_gas
+             )
+  }
+  return(energy_data)
+}
+
+# Apply the function to each building ID and combine the results into a single data frame
+filtered_energy_data <-
+  map_df(filtered_housing_data$bldg_id, fetch_energy_data)
+
+# Save the data to a CSV file in the specified location
+write.csv(filtered_energy_data,
+  "E:/IDS Project/New folder/filtered_energy_data.csv",
+  row.names = FALSE
+)
+
+head(filtered_energy_data)
+nrow(filtered_energy_data)
+```
+
+
+### Step 3: Aggregating Seasonal Weather Data by County
+
+This code chunk automates the fetching and processing of seasonal weather data for specific counties in July, consolidating this data into a single dataset. It then saves the aggregated weather information to a designated directory, ready for further analysis or integration with other datasets.
+
+
+```{r}
+# Load necessary libraries
+library(dplyr)
+library(purrr)
+library(lubridate)
+library(readr)
+
+# Define county codes and construct URLs
+county_codes <- c("G4500730", "G4500850", "G4500910")
+county_urls <- paste0("https://intro-datascience.s3.us-east-2.amazonaws.com/SC-data/weather/2023-weather-data/", county_codes, ".csv")
+
+# Function to process weather data for a specific county
+get_weather_data <- function(county_url, county_code) {
+  # Read weather data from the URL
+  weather_data <- tryCatch({
+    read_csv(county_url, col_types = cols(date_time = col_datetime()))
+  }, error = function(e) {
+    message(sprintf("Error reading data from %s: %s", county_url, e$message))
+    return(NULL)
+  })
+  
+# Check if weather_data is not NULL
+  # Convert 'date_time' column to datetime format using ymd_hms function from lubridate package
+  # Filter the data to include only observations from July (month == 7)
+  # add a new column 'in.county' with county_code values
+  if (!is.null(weather_data)) {
+  weather_data <- weather_data %>%
+    mutate(date_time = parse_date_time(date_time, orders = c("ymd HMS", "ymd HM", "ymd", "mdy HMS", "dmy HMS"), quiet = TRUE)) %>%
+    filter(!is.na(date_time), month(date_time) == 7) %>%
+    mutate(in.county = county_code)
+}
+  return(weather_data)
+}
+
+# Combine data from all specified counties using map2_df
+filtered_weather_data <- map2_df(county_urls, county_codes, get_weather_data)
+
+# Save the filtered weather data to the specified directory
+write.csv(filtered_weather_data, "C:/Users/sagar/Downloads/IDS Project/final code/filtered_weather_data.csv", row.names = FALSE)
+
+# Display the first few rows of the combined dataset
+head(filtered_weather_data)
+nrow(filtered_weather_data)
+```
+
+### Step 4: Integrating Weather and Housing Data
+
+This code chunk combines weather and static housing data by merging them on the county identifier, then saves the merged dataset to a specified location. It streamlines data analysis by creating a comprehensive dataset that correlates housing characteristics with weather conditions.
+
+
+```{r}
+# Load the necessary libraries
+library(dplyr)
+library(readr)
+
+# Define the new paths for the data files
+weather_data_path <- "C:/Users/sagar/Downloads/IDS Project/final code/filtered_weather_data.csv"
+# Load the weather data from the new path
+weather_data <- read_csv(weather_data_path)
+
+house_data_path <- "C:/Users/sagar/Downloads/IDS Project/final code/Final_static_house.csv"
+# Load the house data from the new path
+static_house_data <- read_csv(house_data_path)
+
+# Merge the datasets based on the 'in.county' column
+merged_weather_static_data <- merge(weather_data, static_house_data, by = "in.county", all = TRUE)
+
+# Save the merged data to the new specified directory
+write.csv(merged_weather_static_data, "C:/Users/sagar/Downloads/IDS Project/final code/merged_weather_static_data.csv", row.names = FALSE)
+
+# View the first few rows of the merged dataframe
+head(merged_weather_static_data)
+nrow(merged_weather_static_data)
+```
+
+
+
+### Step 5: Merging and Saving Energy Consumption and Weather Data
+
+This code chunk efficiently merges detailed weather and house data with energy consumption records based on 'time' and 'building ID' identifiers, then saves the consolidated dataset to a specified path. It facilitates comprehensive analysis by providing a unified view of all relevant data attributes.
+
+
+```{r}
+# Load the necessary libraries
+library(dplyr)
+library(readr)
+
+# Define the new paths for the data files
+#merged_weather_static_data_path <- "C:/Users/sagar/Downloads/IDS Project/final code/merged_weather_static_data.csv"
+# Load the merged weather and house data from the new path
+merged_weather_static_data
+
+energy_data_path <- "C:/Users/sagar/Downloads/IDS Project/final code/filtered_energy_data.csv"
+# Load the combined energy data from the new path
+energy_data <- read_csv(energy_data_path)
+
+# Merge the datasets based on the 'time' and 'bldg_id' columns
+merged_all_dataset <- merge(merged_weather_static_data, energy_data, by = c("date_time", "bldg_id"), all.x = TRUE, all.y = TRUE)
+# Remove rows with NA values
+cleaned_merged_all_dataset <- na.omit(merged_all_dataset)
+
+# Define the file path for saving the final merged data
+final_data_save_path <- "C:/Users/sagar/Downloads/IDS Project/final code/merged_all_dataset.csv"
+write.csv(cleaned_merged_all_dataset, final_data_save_path, row.names = FALSE)
+
+# View the first few rows of the final merged dataframe
+head(cleaned_merged_all_dataset)
+nrow(cleaned_merged_all_dataset)
+```
+
+
+### Step 6: Retrieve Column Names of Merged Dataset
+
+This code chunk displays the column names of the final_merged_dataset to identify the data fields available for analysis or further processing.
+
+```{r}
+colnames(cleaned_merged_all_dataset)
+```
+
+
+### Step 7: Visualizing Electricity Consumption over Time and in Every County
+
+This code chunk loads energy consumption and weather data to create visualizations including a time series plot of electricity usage, a histogram of relative humidity, and a density plot of wind speed. These plots provide insights into the temporal dynamics of electricity consumption and the distribution of key weather variables.
+
+```{r}
+# Load necessary libraries
+library(readr)
+library(dplyr)
+library(ggplot2)
+
+# Define the new path for the dataset
+dataset_path <- "C:/Users/sagar/Downloads/IDS Project/final code/merged_all_dataset.csv"
+
+# Load the dataset from the new path
+final_dataset <- read_csv(dataset_path)
+
+# Visualization 1: Time series plot of electricity consumption
+# Filter the data to include only records for the month of July
+july_data <- filter(final_dataset, month(date_time) == 7)
+
+ggplot(july_data, aes(x = date_time, y = total_energy)) +
+  geom_line(color = "orange") +
+  labs(x = "Time", y = "Energy Usage", title = "Energy Usage for the Month of July")
+
+# Visualization 2: Bar plot of electricity consumption in Counties
+# Bar plot
+ggplot(final_dataset, aes(x = in.county, y = electricity)) +
+  geom_bar(stat = "identity", fill = "skyblue") +
+  labs(x = "County", y = "Electricity Consumption (kWh)", title = "Electricity Consumption in County")
+
+```
+```{r}
+library(ggplot2)
+
+# Specify the columns of interest
+columns_of_interest <- c("total_energy", "electricity", "fuel_oil", "natural_gas", "propane")
+
+# Create bar plots for each column over time
+bar_plots_over_time <- lapply(columns_of_interest, function(col) {
+  ggplot(final_dataset, aes(x = date_time, y = !!sym(col))) +
+    geom_bar(stat = "identity", color = "lightpink") +
+    labs(x = "date_time", y = col, title = paste("Bar Plot of", col)) +
+    theme_minimal()
+})
+
+# Arrange the bar plots in a grid
+gridExtra::grid.arrange(grobs = bar_plots_over_time, ncol = 2)
+
+```
+### Step 8: Visualization of Energy Consumption by Type Over Time
+
+This R script transforms energy consumption data into a long format and visualizes it using a stacked bar chart to display the distribution of different energy types (electricity, fuel oil, natural gas, propane) over time. The visualization highlights trends and seasonal variations in energy usage effectively.
+
+```{r}
+# Load the necessary libraries
+library(ggplot2)
+library(readr)
+library(reshape2)
+
+# Load your dataset
+#data <- read_csv("C:/Users/sagar/Downloads/IDS Project/final code/merged_all_dataset.csv")
+july_data <- cleaned_merged_all_dataset %>%
+  filter(month(date_time) == 7)
+
+# Melt the data to long format for the energy types
+energy_data <- melt(july_data, 
+                    id.vars = "date_time", 
+                    measure.vars = c("electricity", "fuel_oil", "natural_gas", "propane"),
+                    variable.name = "Energy_Type", 
+                    value.name = "Consumption")
+
+# Create a line plot
+ggplot(energy_data, aes(x = date_time, y = Consumption, color = Energy_Type)) +
+  geom_line() +
+  labs(title = "Energy Consumption Over Time", x = "Time", y = "Energy Consumption") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)) # Rotate x-axis labels for clarity
+```
+### Step 9: Visualizing Total Electricity Consumption over various factors before temperature increase
+
+```{r}
+merged_all_data <- read_csv("C:/Users/sagar/Downloads/IDS Project/final code/merged_all_dataset.csv")
+
+# Plot 1: Square feet vs. Total Energy Consumption before temperature increase
+ggplot(merged_all_data, aes(x = factor(in.sqft), y = total_energy)) +
+  geom_point(color = "skyblue") +
+  labs(x = "Square Feet", y = "Total Energy Consumption (kWh)") +
+  ggtitle("Square Feet vs. Total Energy Consumption") +
+  theme_minimal()
+```
+```{r}
+# Plot 2: Total Energy Consumption vs. Occupants before temperature increase
+ggplot(merged_all_data, aes(x = factor(in.occupants), y = total_energy)) +
+  geom_point() +
+  geom_point(color = "lightgreen") +
+  labs(x = "Occupants", y = "Total Energy Consumption") +
+  ggtitle("Occupants vs. Total Energy Consumption") +
+  theme_minimal()
+```
+```{r}
+# Plot 3: Total Energy Consumption vs. Appliances before temperature increase
+# Load necessary libraries
+library(ggplot2)
+library(dplyr)
+library(tidyr)  # For pivot_longer
+
+data <- merged_all_data
+
+# Ensure 'time' or equivalent column is in appropriate datetime format
+data$date_time <- as.POSIXct(data$date_time, format = "%Y-%m-%d %H:%M:%S")
+
+# Reshape data to long format for plotting
+data_long <- pivot_longer(data,
+                          cols = c("in.clothes_dryer", "in.clothes_washer", "in.dishwasher", "in.refrigerator"),
+                          names_to = "Appliance",
+                          values_to = "Status")
+
+# Create a ggplot
+ggplot(data_long, aes(x = date_time, y = Status, color = Appliance, group = Appliance)) +
+  geom_line() +  # Change to geom_step() if status changes should be shown as steps
+  labs(title = "Appliance Usage Over Time",
+       x = "Time",
+       y = "Usage/Status",
+       color = "Appliance") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))  # Improve x-axis label readability
+```
+```{r}
+#Final loading and cleaning of merged_all_dataset for training and testing
+library(caret)   # For data partitioning and pre-processing
+library(dplyr)   # For data manipulation 
+
+# Load the data from the specified path
+final_dataset <- read.csv('C:/Users/sagar/Downloads/IDS Project/final code/merged_all_dataset.csv')
+
+#Cleaning and storing of final dataset
+# Drop rows with any NA values
+final_dataset <- na.omit(final_dataset)
+# Identify columns with only a single unique value
+single_value_columns <- sapply(final_dataset, function(column) length(unique(column)) == 1)
+# Drop these columns
+cleaned_final_data <- final_dataset[, !single_value_columns]
+#write.csv(cleaned_final_data, "C:/Users/sagar/Downloads/IDS Project/final code/cleaned_final_data.csv", row.names = FALSE)
+
+#increasing temperature by 5 degree
+cleaned_final_data$Dry.Bulb.Temperature...C. <- cleaned_final_data$Dry.Bulb.Temperature...C.+ 5
+
+# Convert specified variables to factors
+categorical_variables_df <- c('in.county', 'in.city', 'in.clothes_dryer', 'in.clothes_washer', "in.refrigerator", 'in.dishwasher', 'in.heating_fuel', 'in.sqft', 'bldg_id')
+cleaned_final_data[categorical_variables_df] <- lapply(cleaned_final_data[categorical_variables_df], as.factor)
+
+# Create a new response variable 'total_energy_consumption'
+cleaned_final_data$total_energy_consumption <- rowSums(cleaned_final_data[, c('electricity', 'natural_gas')], na.rm = TRUE)
+```
+
+### Step 10:Support Vector Machine (SVM) for Energy Consumption Prediction
+
+This code chunk utilizes the Support Vector Machine (SVM) regression model to predict total energy consumption based on a preprocessed dataset, assessing the model's accuracy through the Root Mean Square Error (RMSE).
+
+```{r}
+# Load necessary libraries
+library(e1071)
+
+# Split the data into training and test sets
+set.seed(123)
+trainIndex <- createDataPartition(cleaned_final_data$total_energy_consumption, p = 0.8, list = FALSE)
+trainData <- cleaned_final_data[trainIndex, ]
+testData <- cleaned_final_data[-trainIndex, ]
+
+#write.csv(trainData, "C:/Users/sagar/Downloads/IDS Project/final code/train_data.csv", row.names = FALSE)
+
+# Train the SVM model with specific predictors
+svmModel <- svm(total_energy_consumption ~ date_time + in.city + bldg_id + in.county + in.clothes_dryer + in.clothes_washer + in.dishwasher + in.refrigerator + in.occupants + in.sqft + in.heating_fuel, data = trainData, kernel = "radial")
+
+# Evaluate the model
+svmPredictions <- predict(svmModel, newdata = testData)
+svmRMSE <- sqrt(mean((svmPredictions - testData$total_energy_consumption)^2))
+print(paste("SVM Model RMSE:", svmRMSE))
+```
+
+
+### Step 11: Preparing and Modeling Energy Consumption Data with GLM
+
+This R script preprocesses energy consumption data, ensuring all categorical variables have sufficient levels, and fits a Generalized Linear Model (GLM) to predict total energy consumption. It then evaluates the model's performance using Root Mean Square Error (RMSE) to measure accuracy.
+
+```{r}
+# Install and load necessary libraries
+library(caret)   # For data partitioning and pre-processing
+library(dplyr)   # For data manipulation
+
+# Split the data into training and test sets
+set.seed(123)
+trainIndex <- createDataPartition(cleaned_final_data$total_energy_consumption, p = 0.8, list = FALSE)
+trainData <- cleaned_final_data[trainIndex, ]
+testData <- cleaned_final_data[-trainIndex, ]
+
+# Train the GLM model
+glmModel <- glm(total_energy_consumption ~ date_time + in.city + bldg_id + in.county + in.clothes_dryer + in.clothes_washer + in.dishwasher + in.refrigerator + in.occupants + in.sqft + in.heating_fuel, data = trainData, family = gaussian)
+
+# Evaluate the model
+glmPredictions <- predict(glmModel, newdata = testData)
+glmRMSE <- sqrt(mean((glmPredictions - testData$total_energy_consumption)^2))
+print(paste("GLM Model RMSE:", glmRMSE))
+```
+### Step 12: Visualizing Total Electricity Consumption over various factors after temperature increase
+
+```{r}
+library(ggplot2)
+# Plot 2: Total Energy Consumption vs. Square feet after temperature increase
+ggplot(testData, aes(x = factor(in.sqft), y = total_energy_consumption)) +
+geom_point(color = "skyblue") +
+labs(x = "Square Feet", y = "Total Energy Consumption (kWh)") +
+ggtitle("Square Feet vs. Total Energy Consumption(After temp increase)") +
+theme_minimal()
+```
+
+```{r}
+# Plot 1: Total Energy Consumption vs. Occupants before temperature increase
+ggplot(testData, aes(x = factor(in.occupants), y = total_energy)) +
+  geom_point() +
+  geom_point(color = "lightgreen") +
+  labs(x = "Occupants", y = "Total Energy Consumption") +
+  ggtitle("Occupants vs. Total Energy Consumption") +
+  theme_minimal()
+```
+```{r}
+# Load necessary libraries
+library(ggplot2)
+library(dplyr)
+library(tidyr)  # For pivot_longer
+
+# Assuming 'final_merged_dataset' is already loaded
+data <- testData
+
+# Ensure 'time' or equivalent column is in appropriate datetime format
+data$date_time <- as.POSIXct(data$date_time, format = "%Y-%m-%d %H:%M:%S")
+
+# Reshape data to long format for plotting
+data_long <- pivot_longer(data,
+                          cols = c("in.clothes_dryer", "in.clothes_washer", "in.dishwasher", "in.refrigerator"),
+                          names_to = "Appliance",
+                          values_to = "Status")
+
+# Create a ggplot
+ggplot(data_long, aes(x = date_time, y = Status, color = Appliance, group = Appliance)) +
+  geom_line() +  # Change to geom_step() if status changes should be shown as steps
+  labs(title = "Appliance Usage Over Time",
+       x = "Time",
+       y = "Usage/Status",
+       color = "Appliance") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))  # Improve x-axis label readability
+```
+
+
